@@ -230,29 +230,56 @@ apt upgrade
 ### Step 1: Create Bootable USB
 
 ```bash
-# On Linux/macOS
-dd if=proxmox-ve_9.1-1.iso of=/dev/sdX bs=4M status=progress
-sync
+# Download latest ISO
+wget https://enterprise.proxmox.com/iso/proxmox-ve_9.1-1.iso
 
-# On Windows: Use Rufus or Etcher
+# Verify checksum
+echo "6d8f5afc78c0c66812d7272cde7c8b98be7eb54401ceb045400db05eb5ae6d22  proxmox-ve_9.1-1.iso" | sha256sum -c
+
+# Write to USB (replace sdX with your USB device)
+sudo dd if=proxmox-ve_9.1-1.iso of=/dev/sdX bs=4M status=progress conv=fsync
 ```
 
-### Step 2: Install Proxmox
+### Step 2: BIOS Configuration (Odroid H4 Ultra)
+
+Press **F2** or **Del** at boot to enter BIOS:
+
+| Setting | Value | Location |
+|---------|-------|----------|
+| Intel VT-d | **ENABLED** | Advanced > CPU Config |
+| Intel VT-x | **ENABLED** | Advanced > CPU Config |
+| SATA Mode | **AHCI** | Advanced > SATA Config |
+| Boot Order | **USB First** | Boot |
+
+Save and exit (F10).
+
+### Step 3: Install Proxmox
 
 1. Boot from USB
-2. Select "Install Proxmox VE (Graphical)"
+2. Select **"Install Proxmox VE (Graphical)"**
 3. Accept EULA
-4. Select NVMe drive as target (NOT the 14TB drives!)
+4. **Target Disk**: Select your **NVMe drive** (NOT the 14TB drives!)
 5. Set country/timezone/keyboard
-6. Set root password and email
-7. **Network Configuration** (IMPORTANT):
-   - Management Interface: Select one NIC temporarily
-   - Hostname: `pve.local` or your choice
-   - IP: Static IP on your current network
-   - Gateway: Your current router
-   - DNS: Your current DNS
+6. Set **root password** and email (for alerts)
+7. **Network Configuration**:
 
-### Step 3: Post-Install Updates
+| Field | Value | Notes |
+|-------|-------|-------|
+| Management Interface | Either NIC | We'll passthrough both later |
+| Hostname | `pve.local` | Or your preference |
+| IP Address | `192.168.x.2/24` | Static IP on your LAN |
+| Gateway | `192.168.x.1` | Your current router |
+| DNS | `8.8.8.8` | Or your router IP |
+
+8. Review summary and **Install**
+9. Remove USB when prompted
+10. Reboot
+
+### Step 4: First Login & Post-Install Updates
+
+Access Proxmox web UI at: `https://<your-IP>:8006`
+- Username: `root`
+- Password: (what you set during install)
 
 ```bash
 # SSH into Proxmox or use web shell
@@ -268,7 +295,7 @@ apt update && apt dist-upgrade -y
 reboot
 ```
 
-### Step 4: Disable Subscription Nag (Optional)
+### Step 5: Disable Subscription Nag (Optional)
 
 ```bash
 # Edit the JavaScript file
