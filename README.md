@@ -16,6 +16,7 @@ A comprehensive guide for setting up a secure home server with Proxmox VE 9, pfS
 10. [Post-Installation Hardening](#post-installation-hardening)
 11. [Troubleshooting](#troubleshooting)
 12. [Maintenance & Monitoring](#maintenance--monitoring)
+13. [Community-Verified Insights (Level1Techs)](#community-verified-insights-level1techs)
 
 ---
 
@@ -114,6 +115,25 @@ reboot
 # Check IOMMU groups are properly separated
 find /sys/kernel/iommu_groups/ -type l | sort -V
 ```
+
+#### 4. Split Lock Detection (Windows VMs)
+**Symptom**: Windows VMs show degraded performance, dmesg shows "took a split_lock trap"
+**Cause**: x86 split lock mitigation in newer kernels
+**Impact**: Can significantly slow Windows guest performance
+**Solution**: Add kernel parameter (has security implications):
+
+```bash
+# Edit GRUB
+nano /etc/default/grub
+
+# Add to GRUB_CMDLINE_LINUX_DEFAULT:
+GRUB_CMDLINE_LINUX_DEFAULT="quiet intel_iommu=on iommu=pt split_lock_detect=off"
+
+update-grub
+reboot
+```
+
+> ⚠️ Disabling split lock detection reduces security. Only use if Windows VM performance is unacceptable.
 
 ### Upgrade Issues (PVE 8 to 9)
 
@@ -359,6 +379,17 @@ lspci -nnk | grep -A3 Ethernet
 
 ### Add Passthrough NICs
 
+> ⚠️ **CRITICAL WARNING - Single Point of Failure**
+>
+> When you pass through both NICs to pfSense, if the pfSense VM crashes or fails to start,
+> you will lose ALL network access to the Proxmox host (including SSH and web GUI).
+>
+> **Mitigations:**
+> - Keep a USB-to-Ethernet adapter available for emergency access
+> - Configure IPMI/BMC if your hardware supports it
+> - Set pfSense VM to auto-start with highest priority (Start Order: 1)
+> - Consider keeping one NIC for Proxmox management (use VirtIO for pfSense LAN instead)
+
 ```bash
 # In Proxmox shell, edit VM config
 nano /etc/pve/qemu-server/100.conf
@@ -373,6 +404,9 @@ Or via Web UI:
 2. Select first Intel NIC (Raw Device)
 3. Check "PCI-Express"
 4. Repeat for second NIC
+
+**Performance Note**: PCI passthrough provides ~15% better throughput than VirtIO
+for firewall workloads, especially noticeable at 10GbE speeds.
 
 ### Install pfSense
 
@@ -390,11 +424,23 @@ Or via Web UI:
 
 ```
 System > Advanced > Networking:
-- [ ] Disable hardware checksum offloading (CHECK THIS)
-- [ ] Disable hardware TCP segmentation offloading (CHECK THIS)
-- [ ] Disable hardware large receive offloading (CHECK THIS)
+- [ ] Disable hardware checksum offloading
+- [ ] Disable hardware TCP segmentation offloading
+- [ ] Disable hardware large receive offloading
+```
 
-# These MUST be disabled for Suricata inline mode!
+> **Note on Hardware Offloading**: Community consensus (Level1Techs) suggests disabling
+> offloading "only if it causes issues" rather than preemptively. However, for Suricata
+> inline mode specifically, disabling is generally required for netmap compatibility.
+> Test with offloading enabled first; disable if you experience packet inspection issues.
+
+### VM Boot Order Configuration
+
+pfSense must start before other VMs to provide network connectivity:
+
+```bash
+# Edit VM config to set start order
+qm set 100 --onboot 1 --startup order=1
 ```
 
 ---
@@ -422,6 +468,11 @@ System > Advanced > Networking:
 Click "Update" to download rules.
 
 ### Configure WAN Interface
+
+> ⚠️ **Stability Warning**: Some users on Level1Techs report Suricata inline mode
+> causing service crashes after ~10 minutes under load (especially during speed tests).
+> This is often NIC-related - Intel NICs with netmap support work best. If you experience
+> crashes, try increasing memory caps or switching to Legacy IPS mode temporarily.
 
 **Services > Suricata > Interfaces > Add:**
 
@@ -505,7 +556,7 @@ cat /var/log/suricata/suricata_em0*/eve.json | grep '"event_type":"alert"' | tai
 
 ## NAS Configuration Options
 
-### Option A: TrueNAS Scale VM (Recommended)
+### Option A: TrueNAS Scale VM
 
 **Pros:**
 - Full ZFS feature set with GUI
@@ -516,6 +567,11 @@ cat /var/log/suricata/suricata_em0*/eve.json | grep '"event_type":"alert"' | tai
 **Cons:**
 - Higher resource usage (16GB RAM minimum)
 - Requires disk/controller passthrough
+- "Double ARC" issue - caching occurs at both Proxmox and TrueNAS levels
+- Linux bridges may hinder performance (per Level1Techs community)
+
+> **Community Note**: Level1Techs users increasingly recommend **Option B or C** below
+> for simpler setups. TrueNAS VM adds complexity; consider if you truly need its features.
 
 #### TrueNAS VM Setup
 
@@ -526,11 +582,33 @@ cat /var/log/suricata/suricata_em0*/eve.json | grep '"event_type":"alert"' | tai
 - System: q35, OVMF (UEFI)
 - Disk: 16GB VirtIO (boot only)
 - CPU: 4 cores, type=host
-- RAM: 16384 MB, Ballooning=OFF
+- RAM: 16384 MB, Ballooning=OFF (CRITICAL - crashes if enabled)
 
 **Passthrough Storage (Choose One):**
 
-**Method 1: SATA Controller Passthrough (Best)**
+**Method 1: HBA Controller Passthrough (Best - Community Recommended)**
+
+For virtualized TrueNAS, an HBA is strongly recommended over onboard SATA.
+
+**Recommended HBAs (Level1Techs verified):**
+| Model | Ports | Notes |
+|-------|-------|-------|
+| LSI 9211-8i | 8 | Classic choice, widely available on eBay |
+| LSI 9305-16i | 16 | PCIe Gen 3, better power efficiency |
+| Broadcom 9500-16i | 16 | Newer generation, ~$300 |
+
+> ⚠️ **Avoid Fujitsu-branded HBAs** - they have custom firmware that's difficult to flash to IT mode.
+
+```bash
+# Find HBA controller
+lspci | grep -i sas
+# Example: 03:00.0 Serial Attached SCSI controller: LSI Logic...
+
+# Add to VM config
+echo "hostpci2: 03:00.0,pcie=1" >> /etc/pve/qemu-server/101.conf
+```
+
+**Method 2: Onboard SATA Controller Passthrough**
 ```bash
 # Find SATA controller
 lspci | grep -i sata
@@ -540,7 +618,10 @@ lspci | grep -i sata
 echo "hostpci2: 00:17.0,pcie=1" >> /etc/pve/qemu-server/101.conf
 ```
 
-**Method 2: Individual Disk Passthrough**
+> Note: Onboard SATA passthrough may not be possible if the controller shares an
+> IOMMU group with other devices. Check with: `find /sys/kernel/iommu_groups/ -type l`
+
+**Method 3: Individual Disk Passthrough (Fallback)**
 ```bash
 # Find disk IDs (stable across reboots)
 ls -la /dev/disk/by-id/ | grep -v part
@@ -555,6 +636,12 @@ qm set 101 -scsi4 /dev/disk/by-id/ata-WDC_WD140EFGX-68B0GN0_WWWWWWWW
 # Edit /etc/pve/qemu-server/101.conf and add serial= to each disk line
 ```
 
+**Limitations of disk passthrough:**
+- No SMART monitoring (virtual disk has no SMART data)
+- Disks reported as 512B/512B sectors even if physical is 4K
+- VM won't start if a disk fails - must remove passthrough first
+- No disk spindown capability
+
 **TrueNAS Pool Configuration:**
 
 | RAID Level | Usable Space | Fault Tolerance | Recommended For |
@@ -563,17 +650,23 @@ qm set 101 -scsi4 /dev/disk/by-id/ata-WDC_WD140EFGX-68B0GN0_WWWWWWWW
 | RAIDZ2 | ~28TB | 2 drives | Recommended for NAS |
 | Mirror (2 pairs) | ~28TB | 1 per pair | Best performance |
 
-### Option B: Proxmox Native ZFS + LXC (Lightweight)
+### Option B: Proxmox Native ZFS + LXC (Community Recommended)
+
+> **Level1Techs Consensus**: "Proxmox will be a better hypervisor and TrueNAS will be
+> a better NAS, but combining them creates complications." Many experienced users now
+> recommend this simpler approach for home use.
 
 **Pros:**
-- Lower overhead (no VM)
-- Direct ZFS access
-- Simpler setup
+- Lower overhead (no VM layer)
+- Direct ZFS access - hypervisor gets native pool access
+- Simpler setup, fewer failure modes
+- No "double ARC" caching inefficiency
+- Can still use Cockpit in LXC for GUI management
 
 **Cons:**
-- Manual snapshot configuration
-- Less GUI polish
-- DIY monitoring
+- Manual snapshot configuration (or use sanoid/syncoid)
+- Less polished GUI than TrueNAS
+- DIY monitoring setup
 
 #### Setup Steps
 
@@ -601,6 +694,40 @@ exportfs -ra
 # Enable SMB via Cockpit LXC or direct install
 apt install samba
 ```
+
+### Option C: LXC Container with Samba/NFS (Lightest Weight)
+
+**For users who want GUI management without TrueNAS overhead:**
+
+```bash
+# Create Debian LXC
+pct create 102 local:vztmpl/debian-12-standard_12.2-1_amd64.tar.zst \
+  --hostname nas-mgmt \
+  --memory 1024 \
+  --cores 2 \
+  --net0 name=eth0,bridge=vmbr0,ip=dhcp \
+  --rootfs local-lvm:8
+
+# Start and enter container
+pct start 102
+pct enter 102
+
+# Install Cockpit for web GUI
+apt update && apt install -y cockpit cockpit-storaged samba
+
+# Access at https://<container-ip>:9090
+```
+
+**Bind mount ZFS datasets into LXC:**
+```bash
+# On Proxmox host, edit LXC config
+echo "mp0: /tank/media,mp=/mnt/media" >> /etc/pve/lxc/102.conf
+
+# Restart LXC
+pct restart 102
+```
+
+This approach uses ~500MB RAM vs 16GB for TrueNAS VM.
 
 ### Storage Recommendations
 
@@ -851,11 +978,54 @@ midclt call service.restart "cifs"  # Restart SMB
 
 ---
 
+## Community-Verified Insights (Level1Techs)
+
+This guide has been verified against discussions from the Level1Techs forum (2024-2025).
+Key threads referenced:
+
+### Proxmox + TrueNAS Architecture
+- [TrueNAS "as" a hypervisor vs TrueNAS "within" Proxmox](https://forum.level1techs.com/t/truenas-as-a-hypervisor-vs-truenas-within-proxmox/226427) (Feb 2025)
+- [Virtualizing TrueNAS on Proxmox 8.3: Checklist](https://forum.level1techs.com/t/virtualizing-truenas-on-proxmox-8-3-checklist-am-i-missing-anything-in-my-config/223206) (Jan 2025)
+- [Homelab setup with Proxmox and virtualized TrueNAS](https://forum.level1techs.com/t/homelab-setup-with-proxmox-and-virtualized-truenas-help-sanity-check/218442) (Oct 2024)
+- [Home Lab: Proxmox ZFS vs TrueNAS Scale VM](https://forum.level1techs.com/t/home-lab-architecture-help-proxmox-zfs-vs-truenas-scale-vm/180213)
+
+### HBA & Storage Passthrough
+- [HBA Recommendation for Proxmox + TrueNAS](https://forum.level1techs.com/t/hba-recommendation-for-proxmox-truenas/210830) (May 2024)
+- [To HBA, or not to HBA](https://forum.level1techs.com/t/to-hba-or-not-to-hba-that-is-the-question/206382) (Jan 2024)
+- [TrueNAS - VM Passthrough HBA](https://forum.level1techs.com/t/truenas-vm-passthrough-hba/242795) (Dec 2025)
+
+### pfSense & Networking
+- [PfSense as Proxmox internal router/firewall](https://forum.level1techs.com/t/pfsense-as-proxmox-internal-router-firewall/226606) (Feb 2025)
+- [PCI Passthrough Intel vs VirtIO for pfSense](https://forum.level1techs.com/t/pci-passthrough-intel-82575gb-vs-virtio-paravirtualized-for-pfsense-install/169036)
+- [New Proxmox/pfSense build](https://forum.level1techs.com/t/new-proxmox-pfsense-build-is-this-possible/207774) (Feb 2024)
+
+### Suricata IPS
+- [Suricata inline mode: Does anyone have this working?](https://forum.level1techs.com/t/suricata-inline-mode-does-anyone-have-this-working/143007)
+- [Disable hardware offloading - how necessary is it?](https://forum.level1techs.com/t/disable-hardware-offloading-how-necessary-is-it-truenas-core/190554)
+
+### Proxmox Kernel & Passthrough
+- [Intel i915 SR-IOV - Updated for Proxmox 9 PVE Kernel 6.14.8](https://forum.level1techs.com/t/intel-i915-sr-iov-mode-for-flex-170-updated-for-proxmox-9-pve-kernel-6-14-8/208294) (Oct 2025)
+- [Proxmox 8.2.4, N5101, PCIe passthrough](https://forum.level1techs.com/t/solved-proxmox-8-2-4-n5101-pcie-passthrough-im-missing-something/215071) (Aug 2024)
+
+### Key Community Takeaways
+
+1. **PCI passthrough > VirtIO** for firewall VMs (~15% better performance)
+2. **HBA passthrough > disk passthrough** for TrueNAS (SMART support, better performance)
+3. **Avoid Fujitsu HBAs** - difficult to flash to IT mode
+4. **pfSense passthrough = single point of failure** - plan for emergency access
+5. **TrueNAS VM adds complexity** - consider native Proxmox ZFS for simpler setups
+6. **Hardware offloading**: disable only if issues occur (except for Suricata inline)
+7. **RAM ballooning must be OFF** for TrueNAS VMs
+8. **LSI 9211-8i/9305-16i** are community-proven HBA choices
+
+---
+
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
 | 1.0 | 2026-01-03 | Initial release |
+| 1.1 | 2026-01-03 | Added Level1Techs community verification, HBA recommendations, pfSense passthrough warnings, LXC NAS option |
 
 ---
 
