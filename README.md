@@ -1,6 +1,11 @@
-# Proxmox VE 9 + pfSense + Suricata IPS + NAS Setup Guide
+# Proxmox VE 9 + OPNsense + Suricata IPS + TrueNAS Scale Setup Guide
 
-A comprehensive guide for setting up a secure home server with Proxmox VE 9, pfSense firewall with Suricata IPS/IDS, and NAS storage on an Odroid H4 Ultra (Intel i3-N305).
+A comprehensive guide for setting up a secure, polished home server with Proxmox VE 9, OPNsense firewall with Suricata IPS/IDS (ET Pro rules), and TrueNAS Scale NAS on an Odroid H4 Ultra (Intel i3-N305).
+
+**Design Goals:**
+- Strong, consistent, virtually maintenance-free firewall
+- Beautiful, family-friendly NAS interface
+- Professional finish - not "patchwork"
 
 ## Table of Contents
 
@@ -10,13 +15,14 @@ A comprehensive guide for setting up a secure home server with Proxmox VE 9, pfS
 4. [Pre-Installation Checklist](#pre-installation-checklist)
 5. [Proxmox Installation](#proxmox-installation)
 6. [IOMMU & Passthrough Configuration](#iommu--passthrough-configuration)
-7. [pfSense VM Setup](#pfsense-vm-setup)
-8. [Suricata IPS Configuration](#suricata-ips-configuration)
+7. [OPNsense VM Setup](#opnsense-vm-setup)
+8. [Suricata IPS Configuration](#suricata-ips-configuration-opnsense)
 9. [NAS Configuration Options](#nas-configuration-options)
 10. [Post-Installation Hardening](#post-installation-hardening)
-11. [Troubleshooting](#troubleshooting)
-12. [Maintenance & Monitoring](#maintenance--monitoring)
-13. [Community-Verified Insights (Level1Techs)](#community-verified-insights-level1techs)
+11. [Polished Family Setup](#polished-family-setup)
+12. [Troubleshooting](#troubleshooting)
+13. [Maintenance & Monitoring](#maintenance--monitoring)
+14. [Community-Verified Insights (Level1Techs)](#community-verified-insights-level1techs)
 
 ---
 
@@ -51,16 +57,16 @@ A comprehensive guide for setting up a secure home server with Proxmox VE 9, pfS
                         ├──────────────────────────────────────────────────────────────┤
 Internet ───┐           │                                                              │
             │           │  ┌────────────────────────┐  ┌────────────────────────────┐  │
-            │           │  │     pfSense VM         │  │   TrueNAS Scale VM         │  │
-            ▼           │  │   (4 vCPU, 4-8GB)      │  │   (4 vCPU, 16GB)           │  │
+            │           │  │     OPNsense VM        │  │   TrueNAS Scale VM         │  │
+            ▼           │  │   (4 vCPU, 12GB)       │  │   (4 vCPU, 16GB)           │  │
       ┌─────────┐       │  │                        │  │                            │  │
-      │  WAN    │◄──────┼──┤  enp1s0 (passthrough)  │  │  SATA Controller or        │  │
-      │  NIC    │       │  │                        │  │  4x 14TB Passthrough       │  │
-      └─────────┘       │  │  ┌──────────────────┐  │  │                            │  │
-                        │  │  │   SURICATA IPS   │  │  │  RAIDZ1 (~42TB usable)     │  │
-      ┌─────────┐       │  │  │   Inline Mode    │  │  │  or RAIDZ2 (~28TB)         │  │
-      │  LAN    │◄──────┼──┤  │   ET Open Rules  │  │  │                            │  │
-      │  NIC    │       │  │  └──────────────────┘  │  │  SMB/NFS/iSCSI Shares      │  │
+      │  WAN    │◄──────┼──┤  enp1s0 (passthrough)  │  │  4x 14TB Disk Passthrough  │  │
+      │  NIC    │       │  │                        │  │                            │  │
+      └─────────┘       │  │  ┌──────────────────┐  │  │  RAIDZ1 (~42TB usable)     │  │
+                        │  │  │   SURICATA IPS   │  │  │                            │  │
+      ┌─────────┐       │  │  │   Inline Mode    │  │  │  • SMB shares for family   │  │
+      │  LAN    │◄──────┼──┤  │   ET Pro Rules   │  │  │  • Plex/Jellyfin apps      │  │
+      │  NIC    │       │  │  └──────────────────┘  │  │  • Beautiful web UI        │  │
       └─────────┘       │  │                        │  │                            │  │
             │           │  │  enp2s0 (passthrough)  │  └────────────────────────────┘  │
             │           │  └────────────────────────┘                                  │
@@ -72,10 +78,14 @@ Internet ───┐           │                                             
 
 | VM/Service | vCPUs | RAM | Storage | Priority |
 |------------|-------|-----|---------|----------|
-| Proxmox Host | 2 reserved | 4GB | NVMe | - |
-| pfSense + Suricata | 4 | 4-8GB | 32GB NVMe | HIGH |
+| Proxmox Host | - | 4GB reserved | NVMe | - |
+| OPNsense + Suricata | 4 | 12GB | 32GB NVMe | HIGH |
 | TrueNAS Scale | 4 | 16GB | 16GB boot + 4x14TB | MEDIUM |
-| Future VMs | Remaining | Remaining | As needed | LOW |
+
+**Total: 32GB fully allocated**
+
+> **Note on RAM**: Suricata with ET Pro full ruleset in inline IPS mode benefits from
+> 10-12GB RAM. The Stream/Flow/Frag memory caps alone can consume 4-6GB under load.
 
 ---
 
@@ -336,22 +346,33 @@ lspci -nnk | grep -A3 Ethernet
 
 ---
 
-## pfSense VM Setup
+## OPNsense VM Setup
 
-### Download pfSense ISO
+### Why OPNsense over pfSense
 
-1. Go to https://www.pfsense.org/download/
-2. Select: AMD64, ISO Installer
-3. Upload to Proxmox: Datacenter > pve > local > ISO Images > Upload
+| Feature | OPNsense | pfSense |
+|---------|----------|---------|
+| UI | Modern, clean | Dated |
+| Suricata | Native integration | Package |
+| Updates | Weekly, smooth | Less frequent |
+| Maintenance | Set-and-forget | More hands-on |
+| ET Pro | Built-in support | Built-in support |
 
-### Create pfSense VM
+### Download OPNsense ISO
+
+1. Go to https://opnsense.org/download/
+2. Select: **amd64**, **dvd** (full installer)
+3. Mirror: Pick closest location
+4. Upload to Proxmox: Datacenter > pve > local > ISO Images > Upload
+
+### Create OPNsense VM
 
 **General Tab:**
 - VM ID: 100
-- Name: pfSense
+- Name: OPNsense
 
 **OS Tab:**
-- ISO: pfSense ISO
+- ISO: OPNsense ISO
 - Type: Other
 
 **System Tab:**
@@ -371,8 +392,8 @@ lspci -nnk | grep -A3 Ethernet
 - Type: host
 
 **Memory Tab:**
-- Memory: 4096-8192 MB
-- Ballooning: DISABLED (important!)
+- Memory: 12288 MB (12GB for ET Pro + Suricata)
+- Ballooning: DISABLED
 
 **Network Tab:**
 - Delete the default network (we'll add passthrough NICs)
@@ -408,148 +429,147 @@ Or via Web UI:
 **Performance Note**: PCI passthrough provides ~15% better throughput than VirtIO
 for firewall workloads, especially noticeable at 10GbE speeds.
 
-### Install pfSense
+### Install OPNsense
 
 1. Start VM, open Console
-2. Accept defaults for most options
-3. Install to virtual disk
-4. Remove ISO and reboot
-5. Assign interfaces:
-   - WAN: First passthrough NIC (igc0 or similar)
-   - LAN: Second passthrough NIC (igc1 or similar)
-6. Set LAN IP (e.g., 192.168.1.1/24)
-7. Access web GUI from LAN at https://192.168.1.1
+2. Login as `installer` / `opnsense`
+3. Select "Install (UFS)" for simplicity
+4. Accept guided disk setup
+5. Set root password
+6. Complete installation and reboot
+7. Remove ISO from VM hardware
+8. Assign interfaces at console:
+   - WAN: `vtnet0` or first passthrough NIC
+   - LAN: `vtnet1` or second passthrough NIC
+9. Set LAN IP (e.g., 192.168.1.1/24)
+10. Access web GUI from LAN at https://192.168.1.1
 
-### Critical pfSense Settings
+### Restore Your Existing Configuration
 
+Since you have a backup from your previous bare metal OPNsense:
+
+1. Complete fresh install with basic WAN/LAN
+2. Access web GUI
+3. Go to **System > Configuration > Backups**
+4. Click **Restore Configuration**
+5. Upload your `.xml` backup file
+6. Check "Restore to a different hardware" if interface names changed
+7. Apply and reboot
+
+> After restore, verify interface assignments match your new passthrough NICs.
+
+### Critical OPNsense Settings
+
+**Interfaces > Settings:**
 ```
-System > Advanced > Networking:
-- [ ] Disable hardware checksum offloading
-- [ ] Disable hardware TCP segmentation offloading
-- [ ] Disable hardware large receive offloading
+Hardware CRC:         ☑ Disable (REQUIRED for Suricata inline)
+Hardware TSO:         ☑ Disable (REQUIRED for Suricata inline)
+Hardware LRO:         ☑ Disable (REQUIRED for Suricata inline)
+VLAN Hardware Filter: ☑ Disable
 ```
 
-> **Note on Hardware Offloading**: Community consensus (Level1Techs) suggests disabling
-> offloading "only if it causes issues" rather than preemptively. However, for Suricata
-> inline mode specifically, disabling is generally required for netmap compatibility.
-> Test with offloading enabled first; disable if you experience packet inspection issues.
+> ⚠️ **Hardware offloading MUST be disabled** for Suricata inline IPS mode.
+> This is non-negotiable - netmap requires software packet handling.
 
 ### VM Boot Order Configuration
 
-pfSense must start before other VMs to provide network connectivity:
+OPNsense must start before other VMs to provide network connectivity:
 
 ```bash
-# Edit VM config to set start order
-qm set 100 --onboot 1 --startup order=1
+# Edit VM config to set start order and auto-start
+qm set 100 --onboot 1 --startup order=1,up=30
 ```
 
 ---
 
-## Suricata IPS Configuration
+## Suricata IPS Configuration (OPNsense)
 
-### Install Suricata Package
+Suricata is **natively integrated** in OPNsense - no package installation needed.
 
-1. System > Package Manager > Available Packages
-2. Search "suricata"
-3. Click Install
+### Configure ET Pro Subscription
 
-### Configure Global Settings
+**Services > Intrusion Detection > Administration > Download:**
 
-**Services > Suricata > Global Settings:**
+1. Enable "Abuse.ch SSL Blacklist" (free)
+2. Enable "ET open/emerging threats" (free)
+3. Enable **"ET pro/emerging threats"** (your subscription)
+4. Enter your ET Pro **Oinkcode** in the field provided
+5. Click **Download & Update Rules**
 
-| Setting | Value | Notes |
-|---------|-------|-------|
-| Enable Suricata VRT | Optional | Requires free registration |
-| Enable ET Open | YES | Free, high-quality rules |
-| Enable ET Pro | Optional | Paid, more rules |
-| Hide Deprecated Rules | YES | Cleaner interface |
-| Update Interval | 12 hours | Balance freshness vs bandwidth |
+### Enable IPS Mode
 
-Click "Update" to download rules.
-
-### Configure WAN Interface
-
-> ⚠️ **Stability Warning**: Some users on Level1Techs report Suricata inline mode
-> causing service crashes after ~10 minutes under load (especially during speed tests).
-> This is often NIC-related - Intel NICs with netmap support work best. If you experience
-> crashes, try increasing memory caps or switching to Legacy IPS mode temporarily.
-
-**Services > Suricata > Interfaces > Add:**
+**Services > Intrusion Detection > Administration > Settings:**
 
 | Setting | Value | Notes |
 |---------|-------|-------|
-| Interface | WAN | Primary protection point |
-| Enable | YES | - |
-| Block Offenders | YES | For IPS mode |
-| IPS Mode | Inline Mode | TRUE IPS (not Legacy) |
-| Block on DROP only | YES | Recommended - granular control |
+| Enabled | ☑ | Master switch |
+| IPS mode | ☑ | **Critical** - enables inline blocking |
+| Promiscuous mode | ☐ | Not needed with IPS |
+| Pattern matcher | Hyperscan | Fastest (i3-N305 has SSE4.2) |
+| Interfaces | WAN | Primary protection point |
 
-### Rule Categories to Enable
+### Configure Rulesets
 
-**WAN Categories Tab** - Enable these for home/small business:
+**Services > Intrusion Detection > Administration > Download:**
+
+After downloading, enable rule categories:
 
 ```
-Essential (Always Enable):
-- emerging-exploit
-- emerging-malware
-- emerging-trojan
-- emerging-worm
-- emerging-dos
-- emerging-scan
-- emerging-shellcode
-- emerging-attack_response
+ET Pro Categories to Enable:
+☑ emerging-exploit
+☑ emerging-malware
+☑ emerging-trojan
+☑ emerging-worm
+☑ emerging-attack_response
+☑ emerging-dos
+☑ emerging-scan
+☑ emerging-shellcode
+☑ emerging-policy
+☑ emerging-compromised
+☑ emerging-botcc
+☑ emerging-drop
+☑ emerging-dshield
 
-Recommended:
-- emerging-policy (blocks known bad)
-- emerging-compromised (known bad IPs)
-- emerging-botcc (botnet C&C)
-- emerging-ciarmy (CI Army bad IPs)
-- emerging-drop (Spamhaus DROP list)
-- emerging-dshield (DShield bad IPs)
-
-Optional (More Alerts):
-- emerging-web_client
-- emerging-web_server (if hosting)
-- emerging-sql (if hosting databases)
+Optional (if hosting services):
+☑ emerging-web_server
+☑ emerging-sql
 ```
 
-### Performance Tuning
+### Memory Tuning for ET Pro
 
-**Interface Settings > WAN:**
+With 12GB RAM allocated and full ET Pro ruleset:
+
+**Services > Intrusion Detection > Administration > Advanced:**
 
 | Setting | Value | Notes |
 |---------|-------|-------|
-| Max Pending Packets | 1024 | Default is fine |
-| Detect Engine Profile | Medium | Balance speed/accuracy |
-| Pattern Matcher | Hyperscan | Fastest, requires SSE4.2 |
-| Stream Memory Cap | 64MB | Increase if memory available |
+| Stream.memcap | 1gb | Up from default 64MB |
+| Flow.memcap | 512mb | Up from default |
+| Defrag.memcap | 256mb | Up from default |
 
-### Suppress False Positives
+### Schedule Automatic Rule Updates
 
-Common false positives to suppress:
+**Services > Intrusion Detection > Administration > Schedule:**
 
-```
-Services > Suricata > Suppress
-
-# Google/Cloudflare DNS over HTTPS
-suppress gen_id 1, sig_id 2027865
-
-# Windows Update traffic
-suppress gen_id 1, sig_id 2027758
-
-# Common streaming services
-suppress gen_id 1, sig_id 2027863
-```
+- Enable: ☑
+- Update frequency: Daily
+- Time: 03:00 (low traffic period)
 
 ### Verify Suricata is Running
 
-```bash
-# In pfSense shell (Diagnostics > Command Prompt)
-ps aux | grep suricata
-# Should show suricata process with -i netmap:...
+**Services > Intrusion Detection > Administration:**
 
-# Check for blocks
-cat /var/log/suricata/suricata_em0*/eve.json | grep '"event_type":"alert"' | tail -20
+Look for green status indicator. Check logs at:
+
+**Services > Intrusion Detection > Log File**
+
+Or via SSH:
+```bash
+# Check service status
+configctl ids status
+
+# View alerts
+tail -f /var/log/suricata/eve.json | grep alert
 ```
 
 ---
@@ -766,28 +786,29 @@ apt install libsasl2-modules
 # Edit /etc/postfix/main.cf for your SMTP relay
 ```
 
-### pfSense Hardening
+### OPNsense Hardening
 
 ```
-1. System > Advanced > Admin Access:
-   - Enable HTTPS only
-   - Disable webConfigurator redirect
-   - Set session timeout (e.g., 240 minutes)
+1. System > Settings > Administration:
+   - Protocol: HTTPS only
+   - SSL Certificate: Create or import proper cert
+   - Listen interfaces: LAN only
+   - Session timeout: 240 minutes
 
-2. System > Advanced > Networking:
-   - Disable all hardware offloading (for Suricata)
+2. Interfaces > Settings:
+   - All hardware offloading: DISABLED (already done for Suricata)
 
 3. Firewall > Rules > WAN:
-   - Block all by default (should already be)
-   - Add specific allow rules as needed
+   - Block all by default (already configured)
+   - Review any port forwards
 
-4. Services > DNS Resolver:
-   - Enable DNSSEC
-   - Consider DoH/DoT upstream
+4. Services > Unbound DNS:
+   - Enable DNSSEC: ☑
+   - DNS over TLS: Consider enabling for privacy
 
-5. System > User Manager:
-   - Create non-admin user for daily use
-   - Enable TOTP 2FA
+5. System > Access > Users:
+   - Create non-root admin user
+   - System > Access > TOTP: Enable 2FA
 ```
 
 ### TrueNAS Hardening
@@ -812,22 +833,144 @@ apt install libsasl2-modules
 
 ---
 
+## Polished Family Setup
+
+This section covers making your NAS beautiful and easy for family members.
+
+### TrueNAS Scale: First Impressions Matter
+
+**Dashboard Customization:**
+1. Log into TrueNAS web UI
+2. Remove widgets you don't need
+3. Keep: Pool Status, Network, CPU/Memory
+4. The clean dashboard shows "everything is working"
+
+**Create User-Friendly Share Structure:**
+```
+tank/
+├── Family/           # Shared family documents
+│   ├── Photos/       # Photo backup destination
+│   ├── Documents/    # Shared documents
+│   └── Videos/       # Home videos
+├── Media/            # Plex/Jellyfin library
+│   ├── Movies/
+│   ├── TV Shows/
+│   └── Music/
+├── Backups/          # Computer backups (Time Machine, etc.)
+│   ├── MacBooks/
+│   └── Windows/
+└── Personal/         # Individual user folders
+    ├── Dad/
+    ├── Mom/
+    └── Kids/
+```
+
+**Create Shares (SMB for Windows/Mac compatibility):**
+
+**Shares > Windows Shares (SMB) > Add:**
+
+| Share | Path | Purpose | Permissions |
+|-------|------|---------|-------------|
+| Family | /mnt/tank/Family | Shared docs | Everyone read/write |
+| Media | /mnt/tank/Media | Plex library | Read-only for users |
+| [Username] | /mnt/tank/Personal/[User] | Private | Owner only |
+
+### Install Family-Friendly Apps
+
+**Apps > Discover Apps:**
+
+| App | Purpose | Family Benefit |
+|-----|---------|----------------|
+| **Plex** | Media streaming | Watch movies/TV anywhere |
+| **Jellyfin** | Free Plex alternative | No subscription needed |
+| **Nextcloud** | File sync | Phone photo backup |
+| **Syncthing** | Folder sync | Keep folders synced across devices |
+| **Immich** | Photo management | Google Photos replacement |
+
+**Plex Setup:**
+1. Apps > Plex > Install
+2. Libraries point to `/mnt/tank/Media/Movies`, etc.
+3. Create family member accounts
+4. Enable hardware transcoding (Intel QuickSync works in TrueNAS)
+
+### Network Share Access for Family
+
+**Windows:**
+1. Open File Explorer
+2. Type `\\truenas` or `\\192.168.1.x` in address bar
+3. Right-click "Family" > "Map network drive"
+4. Assign drive letter (e.g., F: for Family)
+
+**Mac:**
+1. Finder > Go > Connect to Server
+2. Enter `smb://truenas` or `smb://192.168.1.x`
+3. Select shares to mount
+4. Add to Login Items for auto-mount
+
+**Phone/Tablet Photo Backup (Nextcloud or Immich):**
+1. Install app from App Store / Play Store
+2. Enter server URL: `https://nextcloud.yourhouse.local` (or IP)
+3. Enable "Auto-upload photos"
+4. Photos automatically backed up to NAS
+
+### Professional Touches
+
+**Custom SSL Certificates:**
+- Both OPNsense and TrueNAS support Let's Encrypt
+- No more browser "insecure" warnings
+- Family sees a professional, secure setup
+
+**Local DNS Names (via OPNsense):**
+
+**Services > Unbound DNS > Host Overrides:**
+
+| Host | IP | Result |
+|------|-----|--------|
+| nas | 192.168.1.10 | Access via `https://nas` |
+| plex | 192.168.1.10 | Access via `http://plex:32400` |
+| firewall | 192.168.1.1 | Access via `https://firewall` |
+
+**Consistent Branding:**
+- Name your network something memorable
+- Use consistent naming: `HomeNet`, `FamilyNAS`, etc.
+- Avoid tech jargon in share names
+
+### What Family Members See
+
+| They Do | What Happens Behind the Scenes |
+|---------|-------------------------------|
+| Open "Family" drive | SMB share from TrueNAS ZFS pool |
+| Watch movie on Plex | Hardware-transcoded 4K stream |
+| Phone photos sync | Nextcloud auto-uploads to RAIDZ1 |
+| "Is the internet safe?" | ET Pro blocks 50+ threats daily |
+
+**They don't see:**
+- Proxmox hypervisor
+- ZFS pools or datasets
+- Suricata blocking cryptominers
+- Automatic snapshots protecting their data
+
+---
+
 ## Troubleshooting
 
-### Suricata Not Blocking
+### Suricata Not Blocking (OPNsense)
 
 **Symptom**: Alerts generated but traffic not blocked
 
 **Checklist**:
-1. Verify "IPS Mode" is set to "Inline Mode" (not Legacy)
-2. Verify "Block Offenders" is enabled
-3. Verify "Block on DROP only" and rules are set to DROP (not ALERT)
-4. Check hardware offloading is DISABLED
-5. Restart Suricata service
+1. Verify **IPS mode** is checked in Services > Intrusion Detection
+2. Verify rules are set to **Drop** action (not Alert)
+3. Verify hardware offloading is DISABLED (Interfaces > Settings)
+4. Check that WAN interface is selected in IDS settings
+5. Restart IDS service
 
 ```bash
-# Force restart
-/usr/local/etc/rc.d/suricata.sh restart
+# Via SSH
+configctl ids restart
+
+# Or via web UI
+Services > Intrusion Detection > Administration > Stop/Start
 ```
 
 ### PCI Passthrough Not Working
@@ -851,16 +994,17 @@ apt install libsasl2-modules
 3. For controller passthrough, ensure AHCI mode in BIOS
 4. Check TrueNAS console: `camcontrol devlist`
 
-### Network Issues After pfSense Setup
+### Network Issues After OPNsense Setup
 
-**Symptom**: No internet access through pfSense
+**Symptom**: No internet access through OPNsense
 
 **Checklist**:
-1. Verify WAN interface has IP (Status > Interfaces)
-2. Check gateway is assigned (System > Routing)
+1. Verify WAN interface has IP (Interfaces > Overview)
+2. Check gateway is assigned (System > Gateways > Configuration)
 3. Verify DNS is working: `ping 8.8.8.8` vs `ping google.com`
 4. Check firewall rules (Firewall > Rules > WAN)
 5. Check NAT (Firewall > NAT > Outbound)
+6. Verify Unbound DNS is running (Services > Unbound DNS)
 
 ---
 
@@ -868,15 +1012,15 @@ apt install libsasl2-modules
 
 ### Weekly Tasks
 
-- [ ] Check Suricata alerts (Services > Suricata > Alerts)
-- [ ] Review pfSense logs (Status > System Logs)
+- [ ] Check Suricata alerts (Services > Intrusion Detection > Alerts)
+- [ ] Review OPNsense logs (System > Log Files)
 - [ ] Verify backups completed
 - [ ] Check disk health (TrueNAS or smartctl)
 
 ### Monthly Tasks
 
 - [ ] Update Proxmox: `apt update && apt dist-upgrade`
-- [ ] Update pfSense: System > Update
+- [ ] Update OPNsense: System > Firmware > Updates
 - [ ] Update TrueNAS: System Settings > Update
 - [ ] Review firewall rules
 - [ ] Test restore from backup
@@ -885,18 +1029,18 @@ apt install libsasl2-modules
 
 | Tool | Purpose | Location |
 |------|---------|----------|
-| Proxmox Dashboard | Host metrics | Web UI |
-| pfSense Status | Network/Suricata | pfSense Web UI |
-| TrueNAS Alerts | Disk/Pool health | TrueNAS Web UI |
-| Uptime Kuma (optional) | Service monitoring | Docker/LXC |
-| Grafana + InfluxDB (optional) | Metrics visualization | Docker/LXC |
+| Proxmox Dashboard | Host metrics | https://proxmox:8006 |
+| OPNsense Dashboard | Network/Suricata | https://firewall |
+| TrueNAS Dashboard | Disk/Pool health | https://nas |
+| Uptime Kuma (optional) | Service monitoring | TrueNAS App |
+| Grafana (optional) | Metrics visualization | TrueNAS App |
 
 ### Backup Strategy
 
 ```
 Critical Backups:
 1. Proxmox VM configs: /etc/pve/qemu-server/
-2. pfSense config: Diagnostics > Backup & Restore
+2. OPNsense config: System > Configuration > Backups (auto-backup to Google Drive available)
 3. TrueNAS config: System Settings > General > Manage Configuration
 4. TrueNAS datasets: Automated replication or cloud sync
 
@@ -929,21 +1073,26 @@ cat /etc/network/interfaces      # Network config
 ip a                             # Show interfaces
 ```
 
-### pfSense Shell
+### OPNsense Shell
 
 ```bash
-# Suricata
-/usr/local/etc/rc.d/suricata.sh status
-/usr/local/etc/rc.d/suricata.sh restart
+# Suricata / IDS
+configctl ids status             # Check IDS status
+configctl ids restart            # Restart IDS
+configctl ids reload             # Reload rules
 
 # Logs
-clog /var/log/filter.log         # Firewall log
-cat /var/log/suricata/*/eve.json # Suricata events
+tail -f /var/log/suricata/eve.json | grep alert   # Live alerts
+cat /var/log/filter/latest.log   # Firewall log
 
 # Network
 ifconfig                         # Interface status
 netstat -rn                      # Routing table
 pfctl -sr                        # Firewall rules
+
+# System
+configctl firmware status        # Check for updates
+opnsense-update -c               # Check update availability
 ```
 
 ### TrueNAS Shell
@@ -1025,7 +1174,8 @@ Key threads referenced:
 | Version | Date | Changes |
 |---------|------|---------|
 | 1.0 | 2026-01-03 | Initial release |
-| 1.1 | 2026-01-03 | Added Level1Techs community verification, HBA recommendations, pfSense passthrough warnings, LXC NAS option |
+| 1.1 | 2026-01-03 | Added Level1Techs community verification, HBA recommendations, passthrough warnings, LXC NAS option |
+| 2.0 | 2026-01-03 | **Major update**: Switched from pfSense to OPNsense, added ET Pro configuration, polished family setup section, config restore instructions, increased RAM allocation for Suricata |
 
 ---
 
